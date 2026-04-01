@@ -1,13 +1,15 @@
 import streamlit as st
+import pandas as pd
+import plotly.graph_objects as go
 
 st.set_page_config(
-    page_title="wx.ai Nemotron Cost Estimator",
+    page_title="wx.ai Deployment Cost Estimator",
     page_icon="🧮",
     layout="wide"
 )
 
-st.title("IBM watsonx.ai — Nemotron 120B Cost Estimator")
-st.caption("For on-demand hosted deployments · 200 accounts · Based on IBM list pricing")
+st.title("IBM watsonx.ai — On-Demand Deployment Cost Estimator")
+st.caption("Estimate GPU hosting costs for any on-demand model · Based on IBM list pricing")
 
 st.divider()
 
@@ -17,29 +19,37 @@ with st.sidebar:
 
     st.subheader("Deployment")
     gpu_options = {
-        "4×A100 (min viable) — $23.2/hr": 23.2,
-        "8×A100 (full throughput) — $46.4/hr": 46.4,
+        "4×A100 — $23.2/hr": 23.2,
+        "8×A100 — $46.4/hr": 46.4,
         "4×H100 — $58.0/hr": 58.0,
-        "8×H100 (recommended) — $116.0/hr": 116.0,
+        "8×H100 — $116.0/hr": 116.0,
         "4×H200 — $64.0/hr": 64.0,
         "8×H200 — $128.0/hr": 128.0,
+        "1×L40S — $4.43/hr": 4.43,
+        "2×L40S — $8.86/hr": 8.86,
+        "1×A100 — $5.8/hr": 5.8,
+        "2×A100 — $11.6/hr": 11.6,
+        "1×H100 — $14.5/hr": 14.5,
+        "2×H100 — $29.0/hr": 29.0,
+        "1×H200 — $16.0/hr": 16.0,
+        "2×H200 — $32.0/hr": 32.0,
     }
     gpu_label = st.selectbox("GPU configuration", list(gpu_options.keys()))
     gpu_rate = gpu_options[gpu_label]
 
     num_deployments = st.selectbox(
-        "Number of deployment instances",
-        [1, 2, 4],
-        help="Multiple instances reduce queue time for concurrent users."
+        "Number of instances",
+        [1, 2, 4, 8],
+        help="Run multiple instances for high availability or throughput."
     )
 
     hours_per_day = st.slider("Hours active per day", 1, 24, 10)
     days_per_month = st.slider("Days per month", 1, 31, 22)
 
-    st.subheader("Token usage (per account)")
+    st.subheader("Token throughput")
     prompt_tokens = st.slider("Avg prompt tokens / query", 100, 8000, 1000, step=100)
     output_tokens = st.slider("Avg output tokens / query", 100, 4000, 500, step=100)
-    queries_per_day = st.slider("Queries per account per day", 1, 200, 20)
+    queries_per_hour = st.slider("Estimated queries / hour", 1, 5000, 100, step=10)
 
     st.subheader("Platform plan")
     plan = st.radio(
@@ -50,28 +60,29 @@ with st.sidebar:
     )
     platform_base = 1050 if "Standard" in plan else 0
 
-    num_accounts = st.number_input("Number of accounts", min_value=1, value=200, step=10)
-
 # ── Calculations ─────────────────────────────────────────────────────────────
 gpu_cost = gpu_rate * hours_per_day * days_per_month * num_deployments
-total_tokens_M = (num_accounts * queries_per_day * (prompt_tokens + output_tokens) * days_per_month) / 1_000_000
 monthly_total = gpu_cost + platform_base
 annual_total = monthly_total * 12
-per_account = monthly_total / num_accounts
 
-gpu_count = 4 if gpu_rate in [23.2, 58.0, 64.0] else 8
-tok_per_sec = gpu_count * 12 * num_deployments
-total_toks_per_sec = (num_accounts * queries_per_day * (prompt_tokens + output_tokens)) / (hours_per_day * 3600)
-utilisation_pct = min(100, round((total_toks_per_sec / tok_per_sec) * 100, 1))
+total_tokens_per_query = prompt_tokens + output_tokens
+total_toks_per_sec = (queries_per_hour * total_tokens_per_query) / 3600
+gpu_count_map = {4.43: 1, 8.86: 2, 5.8: 1, 11.6: 2, 23.2: 4, 46.4: 8,
+                 14.5: 1, 29.0: 2, 58.0: 4, 116.0: 8,
+                 16.0: 1, 32.0: 2, 64.0: 4, 128.0: 8}
+gpu_count = gpu_count_map.get(gpu_rate, 4)
+tok_per_sec_capacity = gpu_count * 12 * num_deployments
+utilisation_pct = min(100, round((total_toks_per_sec / tok_per_sec_capacity) * 100, 1))
+
+total_tokens_M_month = (queries_per_hour * hours_per_day * days_per_month * total_tokens_per_query) / 1_000_000
 
 # ── Summary metrics ───────────────────────────────────────────────────────────
 st.subheader("Cost summary")
 
-c1, c2, c3, c4 = st.columns(4)
+c1, c2, c3 = st.columns(3)
 c1.metric("Monthly cost", f"${monthly_total:,.0f}")
 c2.metric("Annual cost", f"${annual_total:,.0f}")
-c3.metric(f"Per account / mo", f"${per_account:,.0f}", f"{num_accounts} accounts")
-c4.metric("Est. GPU utilisation", f"{utilisation_pct}%", help="Based on ~12 tok/s per A100/H100 GPU")
+c3.metric("Est. GPU utilisation", f"{utilisation_pct}%")
 
 st.divider()
 
@@ -81,8 +92,6 @@ st.subheader("Cost breakdown")
 col_left, col_right = st.columns([1, 1])
 
 with col_left:
-    import pandas as pd
-
     breakdown = pd.DataFrame({
         "Component": ["GPU hosting", "Platform base", "Total monthly", "Total annual"],
         "Cost (USD)": [
@@ -93,83 +102,68 @@ with col_left:
         ]
     })
     st.dataframe(breakdown, use_container_width=True, hide_index=True)
-
     st.caption(
-        "ℹ️ No per-token charge applies for on-demand hosted models — you pay GPU-hours only. "
-        "Token cost would apply only if IBM later adds per-token billing on top."
+        "ℹ️ No per-token charge for on-demand hosted models — billing is GPU-hours only."
     )
 
 with col_right:
-    import plotly.graph_objects as go
-
-    labels = ["GPU hosting", "Platform base"]
-    values = [gpu_cost, platform_base]
-    colors = ["#3266ad", "#BA7517"]
-
     fig = go.Figure(go.Pie(
-        labels=labels,
-        values=values,
+        labels=["GPU hosting", "Platform base"],
+        values=[gpu_cost, platform_base],
         hole=0.5,
-        marker_colors=colors,
+        marker_colors=["#3266ad", "#BA7517"],
         textinfo="label+percent",
         hovertemplate="%{label}: $%{value:,.0f}<extra></extra>"
     ))
-    fig.update_layout(
-        margin=dict(t=10, b=10, l=10, r=10),
-        height=260,
-        showlegend=False,
-    )
+    fig.update_layout(margin=dict(t=10, b=10, l=10, r=10), height=260, showlegend=False)
     st.plotly_chart(fig, use_container_width=True)
 
 st.divider()
 
-# ── Token volume ──────────────────────────────────────────────────────────────
-st.subheader("Token volume")
+# ── Throughput ────────────────────────────────────────────────────────────────
+st.subheader("Throughput & utilisation")
 
 t1, t2, t3 = st.columns(3)
-t1.metric("Total tokens / month", f"{total_tokens_M:,.1f}M")
-t2.metric("Tokens / account / month", f"{total_tokens_M * 1_000_000 / num_accounts:,.0f}")
-t3.metric("Peak demand (tok/s)", f"{total_toks_per_sec:,.1f}", f"Capacity: {tok_per_sec} tok/s")
+t1.metric("Tokens / month", f"{total_tokens_M_month:,.1f}M")
+t2.metric("Peak demand", f"{total_toks_per_sec:,.1f} tok/s", f"Capacity: {tok_per_sec_capacity} tok/s")
+t3.metric("GPU utilisation", f"{utilisation_pct}%")
 
 if utilisation_pct > 90:
     st.warning(
-        f"⚠️ GPU utilisation is {utilisation_pct}% — consider adding a second deployment instance "
-        "or upgrading to a higher-GPU config to avoid queuing."
+        f"⚠️ Utilisation at {utilisation_pct}% — consider more instances or a larger GPU config to avoid queuing."
     )
 elif utilisation_pct < 20:
     st.info(
-        f"ℹ️ GPU utilisation is only {utilisation_pct}%. You may be over-provisioned. "
-        "Consider reducing to 1 instance or scaling down the GPU config."
+        f"ℹ️ Utilisation at only {utilisation_pct}%. You may be over-provisioned — consider scaling down."
     )
 else:
-    st.success(f"✅ GPU utilisation looks healthy at {utilisation_pct}%.")
+    st.success(f"✅ Utilisation looks healthy at {utilisation_pct}%.")
 
 st.divider()
 
 # ── Scenario comparison ───────────────────────────────────────────────────────
 st.subheader("Scenario comparison")
-st.caption("Fixed scenarios vs. your current config")
+st.caption("Common reference configs vs. your current settings")
 
 scenarios = [
-    {"label": "Minimal (4×A100, 8hrs, 1 instance)", "gpu": 23.2, "hrs": 8, "days": 22, "dep": 1, "base": 1050},
-    {"label": "Business hours (4×A100, 10hrs, 1 instance)", "gpu": 23.2, "hrs": 10, "days": 22, "dep": 1, "base": 1050},
-    {"label": "HA (8×A100, 10hrs, 2 instances)", "gpu": 46.4, "hrs": 10, "days": 22, "dep": 2, "base": 1050},
-    {"label": "24/7 (8×A100, 24hrs, 2 instances)", "gpu": 46.4, "hrs": 24, "days": 30, "dep": 2, "base": 1050},
+    {"label": "Small model, business hours (1×L40S, 10hrs)", "gpu": 4.43, "hrs": 10, "days": 22, "dep": 1, "base": 1050},
+    {"label": "Mid model, business hours (2×A100, 10hrs)", "gpu": 11.6, "hrs": 10, "days": 22, "dep": 1, "base": 1050},
+    {"label": "Large model, business hours (4×A100, 10hrs)", "gpu": 23.2, "hrs": 10, "days": 22, "dep": 1, "base": 1050},
+    {"label": "Large model, HA (8×A100, 10hrs, 2 instances)", "gpu": 46.4, "hrs": 10, "days": 22, "dep": 2, "base": 1050},
+    {"label": "Large model, 24/7 (8×H100, 24hrs, 2 instances)", "gpu": 116.0, "hrs": 24, "days": 30, "dep": 2, "base": 1050},
     {"label": "▶ Your config", "gpu": gpu_rate, "hrs": hours_per_day, "days": days_per_month, "dep": num_deployments, "base": platform_base},
 ]
 
 rows = []
 for s in scenarios:
-    monthly = s["gpu"] * s["hrs"] * s["days"] * s["dep"] + s["base"]
+    m = s["gpu"] * s["hrs"] * s["days"] * s["dep"] + s["base"]
     rows.append({
         "Scenario": s["label"],
-        "Monthly ($)": f"${monthly:,.0f}",
-        "Annual ($)": f"${monthly * 12:,.0f}",
-        "Per account ($)": f"${monthly / num_accounts:,.0f}",
+        "Monthly ($)": f"${m:,.0f}",
+        "Annual ($)": f"${m * 12:,.0f}",
     })
 
-df_scenarios = pd.DataFrame(rows)
-st.dataframe(df_scenarios, use_container_width=True, hide_index=True)
+st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
 st.divider()
 
@@ -179,8 +173,7 @@ with st.expander("Pricing assumptions & notes"):
     - **GPU rates** are IBM list prices from [ibm.com/products/watsonx-ai/pricing](https://www.ibm.com/products/watsonx-ai/pricing) (as of April 2026).
     - **On-demand hosting** requires the **Standard plan** ($1,050/month base). Essentials does not include this feature.
     - **No per-token charge** applies for on-demand hosted models — billing is purely GPU-hours.
-    - **Nemotron Super 120B** is not available as shared inference on wx.ai SaaS — it must run as an on-demand deployment.
-    - **GPU utilisation** is estimated at ~12 tok/s per A100/H100 GPU under typical mixed load. Actual throughput varies with batch size, context length, and quantization.
-    - Prices are indicative, may vary by country, and exclude applicable taxes. IBM may offer volume or committed-use discounts for named accounts.
+    - **GPU utilisation** is estimated at ~12 tok/s per GPU under typical mixed load. Actual throughput varies with model size, batch size, context length, and quantization.
+    - Prices are indicative, may vary by country, and exclude applicable taxes. IBM may offer volume or committed-use discounts.
     - Always verify current pricing at [ibm.com/products/watsonx-ai/pricing](https://www.ibm.com/products/watsonx-ai/pricing).
     """)
